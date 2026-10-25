@@ -1413,12 +1413,6 @@ async fn main() {
         });
     }
 
-    // Spawn task for handling incoming native messages
-    let pending_clone = pending.clone();
-    tokio::spawn(async move {
-        handle_native_messages(native_in_rx, pending_clone).await;
-    });
-
     // Start WebSocket server on the first free candidate port.
     let mut bound = None;
     let mut last_error = None;
@@ -1442,6 +1436,15 @@ async fn main() {
     };
     let _ = BOUND_PORT.set(port);
     register_host(None);
+
+    // Keep early hello messages queued until this host owns a port and its
+    // initial registration is complete. Otherwise hello can overwrite another
+    // host's entry or race with the initial registration and lose its browser.
+    let pending_clone = pending.clone();
+    tokio::spawn(async move {
+        handle_native_messages(native_in_rx, pending_clone).await;
+    });
+
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
             unregister_host();
