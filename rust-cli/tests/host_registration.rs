@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -37,11 +37,6 @@ fn check_registration(early_hello: bool) {
     let firefox_bytes = serde_json::to_vec(&firefox).unwrap();
     std::fs::write(&firefox_path, &firefox_bytes).unwrap();
 
-    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reservation.local_addr().unwrap().port();
-    assert_ne!(port, 8766);
-    drop(reservation);
-
     // Never load a developer's vault, credentials, or native-host settings.
     let mut command = Command::new(env!("CARGO_BIN_EXE_firefox-agent-bridge-host"));
     command.env_clear();
@@ -51,7 +46,9 @@ fn check_registration(early_hello: bool) {
     let mut host = Host(
         command
             .env("FAB_WS_HOST", "127.0.0.1")
-            .env("FAB_WS_PORT", port.to_string())
+            // Let the host reserve its own port atomically, without a
+            // release-before-spawn window where another process can bind it.
+            .env("FAB_WS_PORT", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -72,18 +69,20 @@ fn check_registration(early_hello: bool) {
     }
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut listening = false;
+    let mut address = None;
     let mut hello = false;
-    while !listening || !hello {
+    while address.is_none() || !hello {
         let line = rx
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("host did not bind and process hello before the deadline");
         assert!(
             !line.contains("Failed to bind the agent WebSocket"),
-            "test port became unavailable before host startup: {line}"
+            "host failed to bind: {line}"
         );
-        if line.contains("WebSocket server listening") {
-            listening = true;
+        if let Some((_, value)) = line.split_once("WebSocket server listening on ws://") {
+            let bound: SocketAddr = value.trim().parse().unwrap();
+            assert_ne!(bound.port(), 0, "host must report its actual bound port");
+            address = Some(bound);
             if !early_hello {
                 send_hello(&mut host, "edge");
             }
@@ -92,6 +91,12 @@ fn check_registration(early_hello: bool) {
             hello = true;
         }
     }
+
+    let address = address.unwrap();
+    let port = address.port();
+    assert_ne!(port, 8766);
+    let _connection = TcpStream::connect_timeout(&address, Duration::from_secs(1))
+        .expect("reported host port must accept connections");
 
     assert_eq!(
         std::fs::read(&firefox_path).unwrap(),

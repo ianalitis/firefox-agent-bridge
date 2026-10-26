@@ -1418,10 +1418,13 @@ async fn main() {
     let mut last_error = None;
     for port in candidate_ports() {
         match TcpListener::bind(format!("{}:{}", host, port)).await {
-            Ok(listener) => {
-                bound = Some((listener, port));
-                break;
-            }
+            Ok(listener) => match listener.local_addr() {
+                Ok(address) => {
+                    bound = Some((listener, address.port()));
+                    break;
+                }
+                Err(e) => last_error = Some(format!("local address for {}:{}: {}", host, port, e)),
+            },
             Err(e) => last_error = Some(format!("{}:{}: {}", host, port, e)),
         }
     }
